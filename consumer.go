@@ -57,16 +57,21 @@ func (c *consumer) Consume(
 		return err
 	}
 
-	c.consumeDelivery(ctx, deliveryChan, handler)
+	go c.handleReconnect(&deliveryChan, queue)
 
-	return nil
+	for {
+		err := c.consumeDelivery(ctx, deliveryChan, handler)
+		if err != nil {
+			return err
+		}
+	}
 }
 
 func (c *consumer) consumeDelivery(
 	ctx context.Context,
 	deliveryChan <-chan amqp.Delivery,
 	handler func(ctx context.Context, msg *Message) error,
-) {
+) error {
 	for delivery := range deliveryChan {
 		err := handler(
 			ctx,
@@ -77,10 +82,31 @@ func (c *consumer) consumeDelivery(
 			})
 		if err != nil {
 			_ = delivery.Nack(false, c.consumerConfig.Requeue)
-			return
+			return err
 		}
 		if !c.consumerConfig.AutoAck {
 			_ = delivery.Ack(false)
+		}
+	}
+
+	return nil
+}
+
+func (c *consumer) handleReconnect(deliveryChan *<-chan amqp.Delivery, queue string) {
+	for {
+		select {
+		case <-c.Exit:
+			return
+		case <-c.Reconnect:
+			*deliveryChan, _ = c.channel.Consume(
+				queue,
+				c.consumerConfig.Consumer,
+				c.consumerConfig.AutoAck,
+				c.consumerConfig.Exclusive,
+				c.consumerConfig.NoLocal,
+				c.consumerConfig.NoWait,
+				amqp.Table(c.consumerConfig.Args),
+			)
 		}
 	}
 }

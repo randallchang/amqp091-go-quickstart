@@ -9,12 +9,10 @@ import (
 
 var (
 	defaultSessionConfig = &SessionConfig{
-		ConcurrencyLimit: 1 << 10,
-		Heartbeat:        10 * time.Second,
-		Locale:           "en_US",
+		Heartbeat: 10 * time.Second,
+		Locale:    "en_US",
 	}
 	reconnectIntervalTime time.Duration = 5 * time.Second
-	produceIntervalTime   time.Duration = time.Second
 )
 
 type session struct {
@@ -25,14 +23,16 @@ type session struct {
 	channel              *amqp.Channel
 	connectionNotifyChan chan *amqp.Error
 	channelNotifyChan    chan *amqp.Error
-	exit                 chan struct{}
+	Exit                 chan struct{}
+	Reconnect            chan struct{}
 }
 
 func NewSession(url string) *session {
 	return &session{
 		url:           url,
 		sessionConfig: defaultSessionConfig,
-		exit:          make(chan struct{}),
+		Exit:          make(chan struct{}),
+		Reconnect:     make(chan struct{}),
 	}
 }
 
@@ -77,7 +77,8 @@ func (s *session) connect() error {
 }
 
 func (s *session) Close() error {
-	close(s.exit)
+	close(s.Exit)
+	s.Exit = make(chan struct{})
 	if err := s.channel.Close(); err != nil {
 		return err
 	}
@@ -92,7 +93,7 @@ func (s *session) handleReconnect() {
 		select {
 		case <-s.channelNotifyChan:
 		case <-s.connectionNotifyChan:
-		case <-s.exit:
+		case <-s.Exit:
 			return
 		}
 
@@ -102,15 +103,15 @@ func (s *session) handleReconnect() {
 		}
 
 		// in case of channel block
-		for _ = range s.channelNotifyChan {
+		for range s.channelNotifyChan {
 		}
-		for _ = range s.connectionNotifyChan {
+		for range s.connectionNotifyChan {
 		}
 
 	connect:
 		for {
 			select {
-			case <-s.exit:
+			case <-s.Exit:
 				return
 			default:
 				err := s.connect()
@@ -124,5 +125,7 @@ func (s *session) handleReconnect() {
 				break connect
 			}
 		}
+		close(s.Reconnect)
+		s.Reconnect = make(chan struct{})
 	}
 }
